@@ -1,15 +1,12 @@
 import { useState, useEffect, useCallback } from "react";
 import {
   DollarSign,
-  ShoppingBag,
-  CreditCard,
   TrendingUp,
   Plus,
   Trash2,
   Loader2,
   Wallet,
   Receipt,
-  Calendar,
   PhilippinePeso,
   X,
   AlertTriangle,
