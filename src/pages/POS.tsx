@@ -1,12 +1,33 @@
-import { useState, useEffect } from "react";
-import { Plus, Minus, Trash2, CreditCard } from "lucide-react";
+import { useState, useEffect, useRef, useCallback } from "react";
+import { useOutletContext } from "react-router";
+import {
+  Plus,
+  Minus,
+  Trash2,
+  CreditCard,
+  Wifi,
+  WifiOff,
+  Loader2,
+  CheckCircle2,
+  XCircle,
+  AlertCircle,
+  Info,
+  ShoppingBag,
+  QrCode,
+} from "lucide-react";
+import { notification } from "antd";
+import type { NotificationArgsProps } from "antd";
+import type { RootOutletContext } from "../layout/Root";
+
 import {
   getProducts,
   findCardByNumber,
   updateCardBalance,
   addTransaction,
+  saveCard,
   type Product,
   type Transaction,
+  type RFIDCard,
 } from "../utils/storage";
 
 interface CartItem {
@@ -14,31 +35,107 @@ interface CartItem {
   quantity: number;
 }
 
+type NotifyType = "success" | "error" | "info";
+
+const useNotify = () => {
+  const [api, contextHolder] = notification.useNotification();
+
+  const notify = useCallback(
+    (type: NotifyType, title: string, description?: string) => {
+      const config: NotificationArgsProps = {
+        title,
+        description,
+        placement: "topRight",
+        duration: type === "error" ? 5 : 3,
+      };
+
+      if (type === "success") api.success(config);
+      else if (type === "error") api.error(config);
+      else api.info(config);
+    },
+    [api]
+  );
+
+  return { notify, contextHolder };
+};
+
 export function POS() {
+  const { notify, contextHolder } = useNotify();
+
+  const { mqttStatus, lastRFID, publishLCD, setRFIDHandler } =
+    useOutletContext<RootOutletContext>();
+
   const [products, setProducts] = useState<Product[]>([]);
   const [cart, setCart] = useState<CartItem[]>([]);
-  const [rfidInput, setRfidInput] = useState("");
   const [showPaymentModal, setShowPaymentModal] = useState(false);
+  const [showAddCardModal, setShowAddCardModal] = useState(false);
+
   const [paymentStatus, setPaymentStatus] = useState<
-    "idle" | "processing" | "success" | "error"
+    "idle" | "waiting" | "processing" | "success" | "error"
   >("idle");
+
   const [paymentMessage, setPaymentMessage] = useState("");
   const [loadingProducts, setLoadingProducts] = useState(true);
 
+  const [unknownUID, setUnknownUID] = useState("");
+  const [newCardName, setNewCardName] = useState("");
+  const [newCardBalance, setNewCardBalance] = useState("");
+
+  const cartRef = useRef<CartItem[]>([]);
+  const waitingForRFIDRef = useRef(false);
+  const processingRef = useRef(false);
+
   useEffect(() => {
+    cartRef.current = cart;
+  }, [cart]);
+
+  useEffect(() => {
+    let mounted = true;
+
     const loadProducts = async () => {
       try {
         const data = await getProducts();
-        setProducts(data);
+        if (mounted) setProducts(data);
       } catch (error) {
         console.error("Failed to load products:", error);
+        notify(
+          "error",
+          "Failed to load products",
+          "Check your Firebase connection."
+        );
       } finally {
-        setLoadingProducts(false);
+        if (mounted) setLoadingProducts(false);
       }
     };
 
     loadProducts();
-  }, []);
+
+    return () => {
+      mounted = false;
+    };
+  }, [notify]);
+
+  useEffect(() => {
+    setRFIDHandler(async (uid: string) => {
+      if (!waitingForRFIDRef.current) {
+        setPaymentMessage("RFID detected, but no active payment.");
+        notify(
+          "info",
+          "RFID Detected",
+          "No active payment. Click Pay with RFID first."
+        );
+        return;
+      }
+
+      if (processingRef.current) return;
+
+      await processPayment(uid);
+    });
+
+    return () => {
+      setRFIDHandler(null);
+    };
+  }, [setRFIDHandler]);
 
   const addToCart = (product: Product) => {
     setCart((prev) => {
@@ -73,62 +170,91 @@ export function POS() {
   };
 
   const getTotal = () => {
-    return cart.reduce(
+    return cartRef.current.reduce(
       (sum, item) => sum + item.product.price * item.quantity,
       0
     );
   };
 
   const handlePayment = () => {
-    if (cart.length === 0) {
+    if (cartRef.current.length === 0) {
       setPaymentMessage("Cart is empty!");
       setPaymentStatus("error");
+      notify("error", "Cart is Empty", "Add products before payment.");
       return;
     }
+
+    if (mqttStatus !== "Connected") {
+      notify("error", "MQTT Disconnected", "RFID reader is not connected.");
+      return;
+    }
+
+    waitingForRFIDRef.current = true;
+    processingRef.current = false;
 
     setShowPaymentModal(true);
-    setPaymentStatus("idle");
-    setPaymentMessage("");
-    setRfidInput("");
+    setPaymentStatus("waiting");
+    setPaymentMessage("Waiting for RFID tap...");
+    publishLCD("READY | Tap RFID");
+
+    notify("info", "Waiting for RFID", "Tap the card on the RFID reader.");
   };
 
-  const processPayment = async () => {
-    if (!rfidInput.trim()) {
-      setPaymentMessage("Please enter RFID card number");
-      setPaymentStatus("error");
-      return;
-    }
-
+  const processPayment = async (uid: string) => {
     try {
-      setPaymentStatus("processing");
-      setPaymentMessage("Processing...");
+      processingRef.current = true;
+      waitingForRFIDRef.current = false;
 
-      const card = await findCardByNumber(rfidInput.trim());
+      setPaymentStatus("processing");
+      setPaymentMessage(`Processing card ${uid}...`);
+
+      const card = await findCardByNumber(uid);
 
       if (!card) {
+        publishLCD("UNKNOWN | Add Card");
+
+        setUnknownUID(uid);
+        setNewCardName("");
+        setNewCardBalance("");
+
+        setShowPaymentModal(false);
+        setShowAddCardModal(true);
+
         setPaymentStatus("error");
-        setPaymentMessage("RFID card not found!");
+        setPaymentMessage("Unknown RFID card. Add this card first.");
+
+        notify("error", "Unknown RFID Card", `UID ${uid} is not registered.`);
+        processingRef.current = false;
         return;
       }
 
       const total = getTotal();
 
       if (card.balance < total) {
+        publishLCD("FAILED | No Balance");
+
         setPaymentStatus("error");
         setPaymentMessage(
           `Insufficient balance! Available: ₱${card.balance.toLocaleString()}`
         );
+
+        notify(
+          "error",
+          "Insufficient Balance",
+          `Available: ₱${card.balance.toLocaleString()}`
+        );
+
+        processingRef.current = false;
         return;
       }
 
       const newBalance = card.balance - total;
-
       await updateCardBalance(card.id, newBalance);
 
       const transaction: Transaction = {
         id: Date.now().toString(),
         timestamp: Date.now(),
-        items: cart.map((item) => ({
+        items: cartRef.current.map((item) => ({
           productId: item.product.id,
           productName: item.product.name,
           price: item.product.price,
@@ -141,55 +267,258 @@ export function POS() {
 
       await addTransaction(transaction);
 
+      publishLCD(`SUCCESS | Bal:${newBalance}`);
+
       setPaymentStatus("success");
       setPaymentMessage(
         `Payment successful! Remaining balance: ₱${newBalance.toLocaleString()}`
+      );
+
+      notify(
+        "success",
+        "Payment Successful",
+        `${card.name} — Remaining: ₱${newBalance.toLocaleString()}`
       );
 
       setTimeout(() => {
         setCart([]);
         setShowPaymentModal(false);
         setPaymentStatus("idle");
-        setRfidInput("");
+        setPaymentMessage("");
+        processingRef.current = false;
       }, 2000);
     } catch (error) {
       console.error("Payment failed:", error);
+      publishLCD("FAILED | Error");
+
       setPaymentStatus("error");
-      setPaymentMessage("Payment failed. Check Firebase connection.");
+      setPaymentMessage("Payment failed. Check Firebase or MQTT connection.");
+      notify("error", "Payment Failed", "Check Firebase or MQTT connection.");
+      processingRef.current = false;
     }
   };
 
+  const handleAddUnknownCard = async (e: React.FormEvent) => {
+    e.preventDefault();
+
+    const name = newCardName.trim();
+    const balance = Number(newCardBalance);
+
+    if (!unknownUID || !name || isNaN(balance) || balance < 0) {
+      notify("error", "Invalid Card Details", "Enter a valid name and balance.");
+      return;
+    }
+
+    const newCard: RFIDCard = {
+      id: unknownUID,
+      number: unknownUID,
+      name,
+      balance,
+    };
+
+    try {
+      await saveCard(newCard);
+      publishLCD("CARD ADDED | Ready");
+
+      setShowAddCardModal(false);
+      setUnknownUID("");
+      setNewCardName("");
+      setNewCardBalance("");
+      setPaymentStatus("idle");
+      setPaymentMessage("RFID card added. Press Pay with RFID again.");
+
+      notify(
+        "success",
+        "RFID Card Added",
+        "Press Pay with RFID again to continue payment."
+      );
+    } catch (error) {
+      console.error("Failed to add RFID card:", error);
+      notify("error", "Failed to Add Card", "Check Firebase connection.");
+    }
+  };
+
+  const cancelPayment = () => {
+    waitingForRFIDRef.current = false;
+    processingRef.current = false;
+
+    setShowPaymentModal(false);
+    setPaymentStatus("idle");
+    setPaymentMessage("");
+
+    publishLCD("CANCELLED | Scan Card");
+    notify("info", "Payment Cancelled");
+  };
+
+  const cartTotal = cart.reduce(
+    (sum, item) => sum + item.product.price * item.quantity,
+    0
+  );
+
+  const statusConfig = {
+    idle: { icon: null, color: "", label: "" },
+    waiting: {
+      icon: <Loader2 className="w-8 h-8 animate-spin text-blue-500" />,
+      color: "bg-blue-50 border-blue-200 text-blue-800",
+      label: "Tap RFID card now...",
+    },
+    processing: {
+      icon: <Loader2 className="w-8 h-8 animate-spin text-amber-500" />,
+      color: "bg-amber-50 border-amber-200 text-amber-800",
+      label: "Processing payment...",
+    },
+    success: {
+      icon: <CheckCircle2 className="w-8 h-8 text-green-500" />,
+      color: "bg-green-50 border-green-200 text-green-800",
+      label: "Payment successful!",
+    },
+    error: {
+      icon: <XCircle className="w-8 h-8 text-red-500" />,
+      color: "bg-red-50 border-red-200 text-red-800",
+      label: "Payment failed",
+    },
+  };
+
   return (
-    <div className="max-w-7xl mx-auto p-4 sm:p-6">
+    <div className="max-w-7xl mx-auto">
+      {contextHolder}
+
+      <div className="flex items-center justify-between mb-6">
+        <div>
+          <h2 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+            <ShoppingBag className="w-6 h-6 text-blue-600" />
+            Point of Sale
+          </h2>
+
+          <p className="text-sm text-slate-500 mt-0.5">
+            Tap products to add to cart
+          </p>
+        </div>
+
+        <div
+          className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-sm font-medium ${
+            mqttStatus === "Connected"
+              ? "bg-green-100 text-green-700"
+              : mqttStatus === "Error"
+              ? "bg-red-100 text-red-700"
+              : "bg-slate-100 text-slate-600"
+          }`}
+        >
+          {mqttStatus === "Connected" ? (
+            <Wifi className="w-4 h-4" />
+          ) : (
+            <WifiOff className="w-4 h-4" />
+          )}
+          MQTT {mqttStatus}
+        </div>
+      </div>
+
+      {lastRFID && (
+        <div className="mb-4 flex items-center gap-2 bg-slate-100 border border-slate-200 rounded-xl px-4 py-2.5 text-sm">
+          <QrCode className="w-4 h-4 text-slate-500" />
+          <span className="text-slate-600">Last RFID:</span>
+          <span className="font-mono font-semibold text-slate-900 tracking-wide">
+            {lastRFID}
+          </span>
+        </div>
+      )}
+
+      {paymentMessage && !showPaymentModal && !showAddCardModal && (
+        <div
+          className={`mb-4 rounded-xl px-4 py-3 text-sm flex items-center gap-2 ${
+            paymentStatus === "error"
+              ? "bg-red-50 border border-red-200 text-red-800"
+              : paymentStatus === "success"
+              ? "bg-green-50 border border-green-200 text-green-800"
+              : "bg-blue-50 border border-blue-200 text-blue-800"
+          }`}
+        >
+          {paymentStatus === "error" && (
+            <AlertCircle className="w-4 h-4 shrink-0" />
+          )}
+          {paymentStatus === "success" && (
+            <CheckCircle2 className="w-4 h-4 shrink-0" />
+          )}
+          {paymentStatus === "idle" && <Info className="w-4 h-4 shrink-0" />}
+          {paymentMessage}
+        </div>
+      )}
+
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2">
-          <h2 className="font-bold text-gray-900 mb-4">Products</h2>
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="font-semibold text-slate-900">Products</h3>
+            <span className="text-xs font-semibold text-blue-700 bg-blue-50 border border-blue-100 px-3 py-1 rounded-full">
+              {products.length} items
+            </span>
+          </div>
 
           {loadingProducts ? (
-            <p className="text-gray-500">Loading products...</p>
+            <div className="flex items-center justify-center py-20 text-slate-400">
+              <Loader2 className="w-6 h-6 animate-spin mr-2" />
+              Loading products...
+            </div>
           ) : products.length === 0 ? (
-            <div className="bg-white border border-dashed border-gray-300 rounded-lg p-6 text-center text-gray-500">
-              No products found. Add products in Firebase first.
+            <div className="bg-white border-2 border-dashed border-slate-200 rounded-2xl p-12 text-center">
+              <ShoppingBag className="w-12 h-12 text-slate-300 mx-auto mb-3" />
+              <p className="text-slate-500 font-medium">No products found</p>
+              <p className="text-sm text-slate-400 mt-1">
+                Add products in Firebase first
+              </p>
             </div>
           ) : (
-            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
+            <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-4">
               {products.map((product) => (
                 <button
                   key={product.id}
                   onClick={() => addToCart(product)}
-                  className="bg-white p-4 rounded-lg shadow hover:shadow-md transition-shadow border border-gray-200 text-left"
+                  className="
+                    relative group bg-white rounded-2xl border border-slate-200
+                    p-4 text-left overflow-hidden min-h-[150px]
+                    hover:border-blue-500 hover:shadow-xl hover:shadow-blue-100
+                    active:scale-[0.97]
+                    transition-all duration-200
+                  "
                 >
-                  <div className="font-medium text-gray-900 mb-1">
-                    {product.name}
+                  <div className="absolute inset-0 bg-gradient-to-br from-blue-50 via-white to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
+
+                  <div className="absolute top-3 right-3 bg-blue-600 text-white p-1.5 rounded-xl opacity-0 group-hover:opacity-100 scale-90 group-hover:scale-100 transition-all">
+                    <Plus className="w-4 h-4" />
                   </div>
-                  <div className="text-sm text-gray-600">
-                    ₱{product.price.toLocaleString()}
-                  </div>
-                  {product.category && (
-                    <div className="text-xs text-gray-500 mt-1">
-                      {product.category}
+
+                  <div className="relative z-10 h-full flex flex-col">
+                    <div className="mb-3">
+                      <div className="w-10 h-10 rounded-xl bg-blue-50 border border-blue-100 flex items-center justify-center mb-3">
+                        <ShoppingBag className="w-5 h-5 text-blue-600" />
+                      </div>
+
+                      <div className="text-sm font-bold text-slate-800 leading-snug line-clamp-2 pr-8 group-hover:text-blue-700 transition-colors">
+                        {product.name}
+                      </div>
                     </div>
-                  )}
+
+                    <div className="mt-auto">
+                      <div className="text-2xl font-extrabold text-blue-600 tracking-tight">
+                        ₱{product.price.toLocaleString()}
+                      </div>
+
+                      <div className="mt-2 flex items-center justify-between gap-2">
+                        {product.category ? (
+                          <span className="inline-flex max-w-[120px] truncate text-[10px] font-semibold text-blue-700 bg-blue-100 px-2 py-1 rounded-full">
+                            {product.category}
+                          </span>
+                        ) : (
+                          <span className="text-[10px] font-medium text-slate-400 bg-slate-100 px-2 py-1 rounded-full">
+                            No category
+                          </span>
+                        )}
+
+                        <span className="text-[11px] font-medium text-slate-400 group-hover:text-blue-500 transition-colors">
+                          Tap
+                        </span>
+                      </div>
+                    </div>
+                  </div>
                 </button>
               ))}
             </div>
@@ -197,51 +526,68 @@ export function POS() {
         </div>
 
         <div className="lg:col-span-1">
-          <div className="bg-white p-4 sm:p-6 rounded-lg shadow lg:sticky lg:top-6">
-            <h2 className="font-bold text-gray-900 mb-4">Cart</h2>
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm lg:sticky lg:top-6 overflow-hidden">
+            <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
+              <h3 className="font-semibold text-slate-900 flex items-center gap-2">
+                <ShoppingBag className="w-4 h-4 text-slate-500" />
+                Cart
+              </h3>
+
+              {cart.length > 0 && (
+                <span className="text-xs font-bold text-white bg-blue-600 px-2 py-0.5 rounded-full">
+                  {cart.reduce((sum, i) => sum + i.quantity, 0)}
+                </span>
+              )}
+            </div>
 
             {cart.length === 0 ? (
-              <p className="text-gray-500 text-center py-8">Cart is empty</p>
+              <div className="py-16 text-center">
+                <ShoppingBag className="w-10 h-10 text-slate-200 mx-auto mb-3" />
+                <p className="text-slate-400 text-sm">Your cart is empty</p>
+                <p className="text-xs text-slate-300 mt-1">
+                  Tap products to add
+                </p>
+              </div>
             ) : (
               <>
-                <div className="space-y-3 mb-4">
+                <div className="p-4 space-y-2 max-h-[50vh] overflow-y-auto">
                   {cart.map((item) => (
                     <div
                       key={item.product.id}
-                      className="flex items-center gap-2 p-2 bg-gray-50 rounded"
+                      className="flex items-center gap-3 p-3 bg-slate-50 rounded-xl"
                     >
                       <div className="flex-1 min-w-0">
-                        <div className="font-medium text-sm text-gray-900 truncate">
+                        <div className="font-medium text-sm text-slate-900 truncate">
                           {item.product.name}
                         </div>
-                        <div className="text-xs text-gray-600">
-                          ₱{item.product.price.toLocaleString()}
+                        <div className="text-xs text-slate-500">
+                          ₱{item.product.price.toLocaleString()} each
                         </div>
                       </div>
 
-                      <div className="flex items-center gap-1">
+                      <div className="flex items-center gap-1 bg-white rounded-lg border border-slate-200 p-0.5">
                         <button
                           onClick={() => updateQuantity(item.product.id, -1)}
-                          className="p-1 hover:bg-gray-200 rounded"
+                          className="p-1.5 hover:bg-slate-100 rounded-md transition-colors"
                         >
-                          <Minus className="w-4 h-4" />
+                          <Minus className="w-3.5 h-3.5 text-slate-600" />
                         </button>
 
-                        <span className="w-8 text-center text-sm">
+                        <span className="w-7 text-center text-sm font-semibold text-slate-900">
                           {item.quantity}
                         </span>
 
                         <button
                           onClick={() => updateQuantity(item.product.id, 1)}
-                          className="p-1 hover:bg-gray-200 rounded"
+                          className="p-1.5 hover:bg-slate-100 rounded-md transition-colors"
                         >
-                          <Plus className="w-4 h-4" />
+                          <Plus className="w-3.5 h-3.5 text-slate-600" />
                         </button>
                       </div>
 
                       <button
                         onClick={() => removeFromCart(item.product.id)}
-                        className="p-1 hover:bg-red-100 text-red-600 rounded"
+                        className="p-2 hover:bg-red-50 text-slate-400 hover:text-red-500 rounded-lg transition-colors"
                       >
                         <Trash2 className="w-4 h-4" />
                       </button>
@@ -249,17 +595,30 @@ export function POS() {
                   ))}
                 </div>
 
-                <div className="border-t pt-4">
+                <div className="border-t border-slate-100 p-5 bg-slate-50/50">
+                  <div className="flex justify-between items-center mb-1">
+                    <span className="text-sm text-slate-600">Subtotal</span>
+                    <span className="text-sm text-slate-900">
+                      ₱{cartTotal.toLocaleString()}
+                    </span>
+                  </div>
+
                   <div className="flex justify-between items-center mb-4">
-                    <span className="font-bold text-gray-900">Total</span>
-                    <span className="font-bold text-gray-900">
-                      ₱{getTotal().toLocaleString()}
+                    <span className="text-base font-bold text-slate-900">
+                      Total
+                    </span>
+                    <span className="text-xl font-bold text-slate-900">
+                      ₱{cartTotal.toLocaleString()}
                     </span>
                   </div>
 
                   <button
                     onClick={handlePayment}
-                    className="w-full bg-blue-600 text-white py-3 rounded-lg hover:bg-blue-700 transition-colors flex items-center justify-center gap-2"
+                    disabled={mqttStatus !== "Connected"}
+                    className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 
+                    disabled:cursor-not-allowed text-white font-semibold py-3.5 
+                    rounded-xl transition-all active:scale-[0.98] flex items-center 
+                    justify-center gap-2 shadow-lg shadow-blue-200"
                   >
                     <CreditCard className="w-5 h-5" />
                     Pay with RFID
@@ -272,74 +631,150 @@ export function POS() {
       </div>
 
       {showPaymentModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-lg p-6 max-w-md w-full">
-            <h3 className="font-bold text-gray-900 mb-4">RFID Payment</h3>
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-2xl p-8 max-w-sm w-full text-center shadow-2xl">
+            <div className="mb-6">
+              <div className="w-16 h-16 bg-slate-100 rounded-2xl flex items-center justify-center mx-auto mb-4">
+                {statusConfig[paymentStatus].icon}
+              </div>
 
-            <div className="mb-4">
-              <div className="text-sm text-gray-600 mb-2">Total Amount:</div>
-              <div className="font-bold text-gray-900">
-                ₱{getTotal().toLocaleString()}
+              <h3 className="text-xl font-bold text-slate-900 mb-1">
+                RFID Payment
+              </h3>
+
+              <p className="text-sm text-slate-500">
+                {statusConfig[paymentStatus].label}
+              </p>
+            </div>
+
+            <div className="bg-slate-50 rounded-xl p-4 mb-6">
+              <div className="text-xs text-slate-500 uppercase tracking-wider font-semibold mb-1">
+                Total Amount
+              </div>
+
+              <div className="text-3xl font-bold text-slate-900">
+                ₱{cartTotal.toLocaleString()}
               </div>
             </div>
 
-            <div className="mb-4">
-              <label className="block text-sm text-gray-700 mb-2">
-                Tap or Enter RFID Card Number:
-              </label>
-              <input
-                type="text"
-                value={rfidInput}
-                onChange={(e) => setRfidInput(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && processPayment()}
-                placeholder="257B78E0"
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                disabled={
-                  paymentStatus === "processing" || paymentStatus === "success"
-                }
-                autoFocus
-              />
-            </div>
-
-            {paymentMessage && (
+            {paymentMessage && paymentStatus !== "waiting" && (
               <div
-                className={`mb-4 p-3 rounded-lg ${
-                  paymentStatus === "success"
-                    ? "bg-green-50 text-green-800"
-                    : paymentStatus === "error"
-                    ? "bg-red-50 text-red-800"
-                    : "bg-blue-50 text-blue-800"
+                className={`mb-6 p-4 rounded-xl text-sm ${
+                  statusConfig[paymentStatus].color
                 }`}
               >
                 {paymentMessage}
               </div>
             )}
 
-            <div className="flex gap-2">
-              <button
-                onClick={() => {
-                  setShowPaymentModal(false);
-                  setPaymentStatus("idle");
-                  setRfidInput("");
-                }}
-                className="flex-1 px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50"
-                disabled={
-                  paymentStatus === "processing" || paymentStatus === "success"
-                }
-              >
-                Cancel
-              </button>
+            <button
+              onClick={cancelPayment}
+              disabled={
+                paymentStatus === "processing" || paymentStatus === "success"
+              }
+              className="w-full px-4 py-3 border border-slate-200 rounded-xl font-medium
+              text-slate-700 hover:bg-slate-50 disabled:opacity-50 
+              disabled:cursor-not-allowed transition-colors"
+            >
+              Cancel Payment
+            </button>
+          </div>
+        </div>
+      )}
 
-              <button
-                onClick={processPayment}
-                className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-400"
-                disabled={
-                  paymentStatus === "processing" || paymentStatus === "success"
-                }
-              >
-                {paymentStatus === "processing" ? "Processing..." : "Pay"}
-              </button>
+      {showAddCardModal && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-2xl p-6 max-w-md w-full shadow-2xl">
+            <div className="mb-6">
+              <div className="w-12 h-12 bg-amber-100 rounded-xl flex items-center justify-center mb-3">
+                <AlertCircle className="w-6 h-6 text-amber-600" />
+              </div>
+
+              <h3 className="text-xl font-bold text-slate-900">
+                Add Unknown RFID Card
+              </h3>
+
+              <p className="text-sm text-slate-500 mt-1">
+                This card is not registered in the system
+              </p>
             </div>
+
+            <div className="mb-5 p-3 bg-amber-50 border border-amber-200 rounded-xl">
+              <div className="text-xs text-amber-700 font-medium uppercase tracking-wider mb-1">
+                Detected UID
+              </div>
+
+              <div className="font-mono font-bold text-amber-900 text-lg tracking-widest">
+                {unknownUID}
+              </div>
+            </div>
+
+            <form onSubmit={handleAddUnknownCard} className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1.5">
+                  Card Holder Name
+                </label>
+
+                <input
+                  type="text"
+                  value={newCardName}
+                  onChange={(e) => setNewCardName(e.target.value)}
+                  className="w-full px-4 py-2.5 border border-slate-200 rounded-xl
+                  focus:outline-none focus:ring-2 focus:ring-blue-500/20 
+                  focus:border-blue-500 transition-all"
+                  placeholder="e.g. Juan Dela Cruz"
+                  required
+                  autoFocus
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1.5">
+                  Initial Balance (₱)
+                </label>
+
+                <input
+                  type="number"
+                  value={newCardBalance}
+                  onChange={(e) => setNewCardBalance(e.target.value)}
+                  className="w-full px-4 py-2.5 border border-slate-200 rounded-xl
+                  focus:outline-none focus:ring-2 focus:ring-blue-500/20 
+                  focus:border-blue-500 transition-all"
+                  placeholder="100"
+                  min="0"
+                  step="1"
+                  required
+                />
+              </div>
+
+              <div className="flex gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowAddCardModal(false);
+                    setUnknownUID("");
+                    setNewCardName("");
+                    setNewCardBalance("");
+                    setPaymentStatus("idle");
+                    setPaymentMessage("");
+                    publishLCD("CANCELLED | Scan Card");
+                    notify("info", "Add Card Cancelled");
+                  }}
+                  className="flex-1 px-4 py-2.5 border border-slate-200 rounded-xl
+                  font-medium text-slate-700 hover:bg-slate-50 transition-colors"
+                >
+                  Cancel
+                </button>
+
+                <button
+                  type="submit"
+                  className="flex-1 px-4 py-2.5 bg-blue-600 text-white font-medium
+                  rounded-xl hover:bg-blue-700 active:scale-[0.98] transition-all"
+                >
+                  Add Card
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
