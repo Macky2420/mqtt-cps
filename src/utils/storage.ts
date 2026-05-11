@@ -5,7 +5,6 @@ import {
   signInWithEmailAndPassword,
   signOut,
   onAuthStateChanged,
-  type User as FirebaseUser,
 } from "firebase/auth";
 
 // ===== TYPES =====

@@ -29,7 +29,6 @@ import {
   loginUser,
   getCurrentUser,
   findCardByNumber,
-  type AppUser,
 } from "../utils/storage";
 
 const useNotify = () => {
