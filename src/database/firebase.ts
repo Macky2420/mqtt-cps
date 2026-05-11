@@ -1,5 +1,6 @@
 import { initializeApp } from "firebase/app";
 import { getDatabase } from "firebase/database";
+import { getAuth } from "firebase/auth";
 
 const firebaseConfig = {
   apiKey: "AIzaSyC4s_h3BVaGx4HvjqEfGt5pdQNH_3UqdJE",
@@ -12,7 +13,16 @@ const firebaseConfig = {
   measurementId: "G-65Y9RWLB23"
 };
 
+// Initialize Firebase
 const app = initializeApp(firebaseConfig);
 
-// 🔥 THIS IS WHAT YOU MISSED
+// Export services
 export const db = getDatabase(app);
+export const auth = getAuth(app);
+
+// Suppress Dynamic Links deprecation warning
+// This is safe because we don't use email link auth or Cordova OAuth
+if (typeof window !== "undefined") {
+  // @ts-ignore
+  window.FIREBASE_APPCHECK_DEBUG_TOKEN = true;
+}

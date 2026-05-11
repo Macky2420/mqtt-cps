@@ -14,6 +14,7 @@ import {
   Info,
   ShoppingBag,
   QrCode,
+  Shield,
 } from "lucide-react";
 import { notification } from "antd";
 import type { NotificationArgsProps } from "antd";
@@ -62,8 +63,10 @@ const useNotify = () => {
 export function POS() {
   const { notify, contextHolder } = useNotify();
 
-  const { mqttStatus, lastRFID, publishLCD, setRFIDHandler } =
+  const { mqttStatus, lastRFID, publishLCD, setRFIDHandler, currentUser } =
     useOutletContext<RootOutletContext>();
+
+  const isAdmin = currentUser?.role === "admin";
 
   const [products, setProducts] = useState<Product[]>([]);
   const [cart, setCart] = useState<CartItem[]>([]);
@@ -138,6 +141,15 @@ export function POS() {
   }, [setRFIDHandler]);
 
   const addToCart = (product: Product) => {
+    if (isAdmin) {
+      notify(
+        "info",
+        "Admin Access",
+        "Admins cannot add items to cart. Only normal users can make purchases."
+      );
+      return;
+    }
+
     setCart((prev) => {
       const existing = prev.find((item) => item.product.id === product.id);
 
@@ -177,6 +189,15 @@ export function POS() {
   };
 
   const handlePayment = () => {
+    if (isAdmin) {
+      notify(
+        "error",
+        "Admin Restriction",
+        "Admins cannot process payments. Only normal users can pay with RFID."
+      );
+      return;
+    }
+
     if (cartRef.current.length === 0) {
       setPaymentMessage("Cart is empty!");
       setPaymentStatus("error");
@@ -391,7 +412,9 @@ export function POS() {
           </h2>
 
           <p className="text-sm text-slate-500 mt-0.5">
-            Tap products to add to cart
+            {isAdmin
+              ? "View products (admin cannot purchase)"
+              : "Tap products to add to cart"}
           </p>
         </div>
 
@@ -444,6 +467,20 @@ export function POS() {
         </div>
       )}
 
+      {isAdmin && (
+        <div className="mb-6 p-4 bg-amber-50 border border-amber-200 rounded-xl flex items-center gap-3">
+          <Shield className="w-5 h-5 text-amber-600 shrink-0" />
+          <div>
+            <p className="text-sm font-semibold text-amber-800">
+              Admin Mode — Read Only
+            </p>
+            <p className="text-xs text-amber-600 mt-0.5">
+              As an admin, you can view products but cannot add them to cart or make purchases. Only normal users can buy products.
+            </p>
+          </div>
+        </div>
+      )}
+
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2">
           <div className="flex items-center justify-between mb-4">
@@ -472,19 +509,29 @@ export function POS() {
                 <button
                   key={product.id}
                   onClick={() => addToCart(product)}
-                  className="
+                  disabled={isAdmin}
+                  className={`
                     relative group bg-white rounded-2xl border border-slate-200
                     p-4 text-left overflow-hidden min-h-[150px]
                     hover:border-blue-500 hover:shadow-xl hover:shadow-blue-100
                     active:scale-[0.97]
                     transition-all duration-200
-                  "
+                    ${isAdmin ? "opacity-60 cursor-not-allowed hover:border-slate-200 hover:shadow-none active:scale-100" : ""}
+                  `}
                 >
                   <div className="absolute inset-0 bg-gradient-to-br from-blue-50 via-white to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
 
                   <div className="absolute top-3 right-3 bg-blue-600 text-white p-1.5 rounded-xl opacity-0 group-hover:opacity-100 scale-90 group-hover:scale-100 transition-all">
                     <Plus className="w-4 h-4" />
                   </div>
+
+                  {isAdmin && (
+                    <div className="absolute inset-0 flex items-center justify-center bg-white/50 rounded-2xl z-20">
+                      <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider bg-white/90 px-2 py-1 rounded-md border border-slate-200">
+                        View Only
+                      </span>
+                    </div>
+                  )}
 
                   <div className="relative z-10 h-full flex flex-col">
                     <div className="mb-3">
@@ -514,7 +561,7 @@ export function POS() {
                         )}
 
                         <span className="text-[11px] font-medium text-slate-400 group-hover:text-blue-500 transition-colors">
-                          Tap
+                          {isAdmin ? "View" : "Tap"}
                         </span>
                       </div>
                     </div>
@@ -533,14 +580,26 @@ export function POS() {
                 Cart
               </h3>
 
-              {cart.length > 0 && (
+              {!isAdmin && cart.length > 0 && (
                 <span className="text-xs font-bold text-white bg-blue-600 px-2 py-0.5 rounded-full">
                   {cart.reduce((sum, i) => sum + i.quantity, 0)}
                 </span>
               )}
             </div>
 
-            {cart.length === 0 ? (
+            {isAdmin ? (
+              <div className="py-16 text-center px-6">
+                <Shield className="w-10 h-10 text-amber-300 mx-auto mb-3" />
+                <p className="text-slate-500 text-sm font-medium">
+                  Admin Account
+                </p>
+                <p className="text-xs text-slate-400 mt-1 leading-relaxed">
+                  Admins manage products and cards.
+                  <br />
+                  Only normal users can make purchases.
+                </p>
+              </div>
+            ) : cart.length === 0 ? (
               <div className="py-16 text-center">
                 <ShoppingBag className="w-10 h-10 text-slate-200 mx-auto mb-3" />
                 <p className="text-slate-400 text-sm">Your cart is empty</p>
