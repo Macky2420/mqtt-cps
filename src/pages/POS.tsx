@@ -15,6 +15,7 @@ import {
   ShoppingBag,
   QrCode,
   Shield,
+  Wallet,
 } from "lucide-react";
 import { notification } from "antd";
 import type { NotificationArgsProps } from "antd";
@@ -26,10 +27,13 @@ import {
   updateCardBalance,
   addTransaction,
   saveCard,
+  getAllCards,
   type Product,
   type Transaction,
   type RFIDCard,
 } from "../utils/storage";
+
+import { TopUpModal } from "../components/TopUpModal";
 
 interface CartItem {
   product: Product;
@@ -72,6 +76,12 @@ export function POS() {
   const [cart, setCart] = useState<CartItem[]>([]);
   const [showPaymentModal, setShowPaymentModal] = useState(false);
   const [showAddCardModal, setShowAddCardModal] = useState(false);
+
+  // ─── Top-Up State ───────────────────────────────────────────
+  const [showTopUpModal, setShowTopUpModal] = useState(false);
+  const [selectedTopUpCard, setSelectedTopUpCard] = useState<RFIDCard | null>(null);
+  const [loadingCards, setLoadingCards] = useState(false);
+  const [myCard, setMyCard] = useState<RFIDCard | null>(null);
 
   const [paymentStatus, setPaymentStatus] = useState<
     "idle" | "waiting" | "processing" | "success" | "error"
@@ -117,6 +127,29 @@ export function POS() {
       mounted = false;
     };
   }, [notify]);
+
+  // ─── Load user's own card ───────────────────────────────────
+  const loadMyCard = async () => {
+    if (!currentUser || isAdmin) return;
+
+    try {
+      setLoadingCards(true);
+      const cards = await getAllCards();
+      // Find card that belongs to current user
+      const ownedCard = cards.find((c) => c.userId === currentUser.uid);
+      setMyCard(ownedCard || null);
+    } catch (error) {
+      console.error("Failed to load card:", error);
+    } finally {
+      setLoadingCards(false);
+    }
+  };
+
+  useEffect(() => {
+    if (currentUser && !isAdmin) {
+      loadMyCard();
+    }
+  }, [currentUser, isAdmin]);
 
   useEffect(() => {
     setRFIDHandler(async (uid: string) => {
@@ -284,6 +317,7 @@ export function POS() {
         total,
         cardNumber: card.number,
         cardName: card.name,
+        type: "purchase",
       };
 
       await addTransaction(transaction);
@@ -335,6 +369,8 @@ export function POS() {
       number: unknownUID,
       name,
       balance,
+      userId: currentUser?.uid,
+      userEmail: currentUser?.email,
     };
 
     try {
@@ -369,6 +405,24 @@ export function POS() {
 
     publishLCD("CANCELLED | Scan Card");
     notify("info", "Payment Cancelled");
+  };
+
+  // ─── Top-Up Handlers ────────────────────────────────────────
+  const handleOpenTopUp = () => {
+    if (isAdmin) {
+      notify("error", "Access Denied", "Admins cannot top up. Only card owners can add funds to their own account.");
+      return;
+    }
+    if (!myCard) {
+      notify("error", "No Card Found", "You don't have a registered RFID card. Please register first.");
+      return;
+    }
+    setSelectedTopUpCard(myCard);
+    setShowTopUpModal(true);
+  };
+
+  const handleTopUpComplete = () => {
+    loadMyCard(); // Refresh card data
   };
 
   const cartTotal = cart.reduce(
@@ -418,21 +472,39 @@ export function POS() {
           </p>
         </div>
 
-        <div
-          className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-sm font-medium ${
-            mqttStatus === "Connected"
-              ? "bg-green-100 text-green-700"
-              : mqttStatus === "Error"
-              ? "bg-red-100 text-red-700"
-              : "bg-slate-100 text-slate-600"
-          }`}
-        >
-          {mqttStatus === "Connected" ? (
-            <Wifi className="w-4 h-4" />
-          ) : (
-            <WifiOff className="w-4 h-4" />
+        <div className="flex items-center gap-3">
+          {/* ─── Top Up Button ──────────────────────────────── */}
+          {!isAdmin && (
+            <button
+              onClick={handleOpenTopUp}
+              disabled={!myCard}
+              className={`flex items-center gap-2 px-4 py-2 text-sm font-semibold rounded-xl transition-all active:scale-[0.98] shadow-lg ${
+                myCard
+                  ? "bg-green-600 hover:bg-green-700 text-white shadow-green-200"
+                  : "bg-slate-300 text-slate-500 cursor-not-allowed"
+              }`}
+            >
+              <Wallet className="w-4 h-4" />
+              {myCard ? "Top Up Balance" : "No Card Linked"}
+            </button>
           )}
-          MQTT {mqttStatus}
+
+          <div
+            className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-sm font-medium ${
+              mqttStatus === "Connected"
+                ? "bg-green-100 text-green-700"
+                : mqttStatus === "Error"
+                ? "bg-red-100 text-red-700"
+                : "bg-slate-100 text-slate-600"
+            }`}
+          >
+            {mqttStatus === "Connected" ? (
+              <Wifi className="w-4 h-4" />
+            ) : (
+              <WifiOff className="w-4 h-4" />
+            )}
+            MQTT {mqttStatus}
+          </div>
         </div>
       </div>
 
@@ -475,7 +547,39 @@ export function POS() {
               Admin Mode — Read Only
             </p>
             <p className="text-xs text-amber-600 mt-0.5">
-              As an admin, you can view products but cannot add them to cart or make purchases. Only normal users can buy products.
+              As an admin, you can view products but cannot add them to cart, make purchases, or top up balances. Only normal users can buy products and manage their own funds.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* ─── User's Card Info Banner (non-admin) ────────────── */}
+      {!isAdmin && myCard && (
+        <div className="mb-6 p-4 bg-green-50 border border-green-200 rounded-xl flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 bg-green-100 rounded-xl flex items-center justify-center">
+              <CreditCard className="w-5 h-5 text-green-600" />
+            </div>
+            <div>
+              <p className="text-sm font-semibold text-green-900">{myCard.name}</p>
+              <p className="text-xs text-green-600 font-mono">{myCard.number}</p>
+            </div>
+          </div>
+          <div className="text-right">
+            <p className="text-xs text-green-600">Your Balance</p>
+            <p className="text-xl font-bold text-green-800">₱{myCard.balance.toLocaleString()}</p>
+          </div>
+        </div>
+      )}
+
+      {/* ─── No Card Warning (non-admin, no card) ───────────── */}
+      {!isAdmin && !myCard && !loadingCards && (
+        <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-xl flex items-center gap-3">
+          <AlertCircle className="w-5 h-5 text-red-600 shrink-0" />
+          <div>
+            <p className="text-sm font-semibold text-red-800">No RFID Card Linked</p>
+            <p className="text-xs text-red-600 mt-0.5">
+              You need to register or bind an RFID card to your account to make purchases and top up.
             </p>
           </div>
         </div>
@@ -572,7 +676,8 @@ export function POS() {
           )}
         </div>
 
-        <div className="lg:col-span-1">
+        <div className="lg:col-span-1 space-y-4">
+          {/* Cart Panel */}
           <div className="bg-white rounded-2xl border border-slate-200 shadow-sm lg:sticky lg:top-6 overflow-hidden">
             <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
               <h3 className="font-semibold text-slate-900 flex items-center gap-2">
@@ -596,7 +701,7 @@ export function POS() {
                 <p className="text-xs text-slate-400 mt-1 leading-relaxed">
                   Admins manage products and cards.
                   <br />
-                  Only normal users can make purchases.
+                  Only normal users can make purchases and top up.
                 </p>
               </div>
             ) : cart.length === 0 ? (
@@ -689,6 +794,20 @@ export function POS() {
         </div>
       </div>
 
+      {/* ─── TopUpModal Component ─────────────────────────────── */}
+      <TopUpModal
+        isOpen={showTopUpModal}
+        onClose={() => {
+          setShowTopUpModal(false);
+          setSelectedTopUpCard(null);
+        }}
+        card={selectedTopUpCard}
+        currentUser={currentUser}
+        publishLCD={publishLCD}
+        onTopUpComplete={handleTopUpComplete}
+      />
+
+      {/* Payment Modal */}
       {showPaymentModal && (
         <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-2xl p-8 max-w-sm w-full text-center shadow-2xl">
@@ -741,6 +860,7 @@ export function POS() {
         </div>
       )}
 
+      {/* Add Card Modal */}
       {showAddCardModal && (
         <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-2xl p-6 max-w-md w-full shadow-2xl">

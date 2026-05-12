@@ -20,6 +20,9 @@ export interface RFIDCard {
   number: string;
   name: string;
   balance: number;
+  userId?: string;        // Bound user account
+  userEmail?: string;     // Bound user email
+  createdAt?: number;
 }
 
 export interface Transaction {
@@ -34,6 +37,7 @@ export interface Transaction {
   total: number;
   cardNumber: string;
   cardName: string;
+  type?: "purchase" | "topup";
 }
 
 export interface ManualIncome {
@@ -51,6 +55,23 @@ export interface AppUser {
   role: "admin" | "user";
   rfidNumber?: string;
   createdAt: number;
+}
+
+// ─── NEW: Top-Up Transaction Type ─────────────────────────────
+export interface TopUpTransaction {
+  id: string;
+  timestamp: number;
+  cardId: string;
+  cardNumber: string;
+  cardName: string;
+  userId: string;
+  userEmail: string;
+  amount: number;
+  method: "paypal" | "maya" | "gcash";
+  status: "pending" | "success" | "failed";
+  referenceCode: string;
+  previousBalance: number;
+  newBalance: number;
 }
 
 // ===== AUTH =====
@@ -71,6 +92,9 @@ export async function registerUser(
     number: rfidNumber.toUpperCase(),
     name: fullName,
     balance: initialBalance,
+    userId: firebaseUser.uid,
+    userEmail: firebaseUser.email!,
+    createdAt: Date.now(),
   };
   await set(ref(db, `rfid_users/${card.id}`), card);
 
@@ -88,15 +112,13 @@ export async function registerUser(
   return appUser;
 }
 
-// In storage.ts - update the loginUser function
-
 export async function loginUser(email: string, password: string): Promise<AppUser> {
   const userCredential = await signInWithEmailAndPassword(auth, email, password);
   const firebaseUser = userCredential.user;
 
   // Get user profile from database
   const snapshot = await get(ref(db, `users/${firebaseUser.uid}`));
-  
+
   if (!snapshot.exists()) {
     // Auto-create profile if missing (for admin or legacy users)
     const newUser: AppUser = {
@@ -106,7 +128,7 @@ export async function loginUser(email: string, password: string): Promise<AppUse
       role: email === "admin@cashlesspay.com" ? "admin" : "user",
       createdAt: Date.now(),
     };
-    
+
     await set(ref(db, `users/${firebaseUser.uid}`), newUser);
     return newUser;
   }
@@ -154,6 +176,10 @@ export async function getCards(): Promise<RFIDCard[]> {
   const snapshot = await get(ref(db, "rfid_users"));
   if (!snapshot.exists()) return [];
   return Object.values(snapshot.val()) as RFIDCard[];
+}
+
+export async function getAllCards(): Promise<RFIDCard[]> {
+  return getCards(); // Alias for consistency
 }
 
 export async function saveCard(card: RFIDCard) {
@@ -216,4 +242,57 @@ export async function getTotalIncome(): Promise<number> {
   const manualIncomeTotal = manualIncome.reduce((sum, i) => sum + i.amount, 0);
 
   return transactionIncome + manualIncomeTotal;
+}
+
+// ─── NEW: Top-Up Functions (Realtime Database version) ───────
+
+export async function addTopUpTransaction(tx: TopUpTransaction): Promise<void> {
+  const newRef = push(ref(db, "topup_transactions"));
+  await set(newRef, { ...tx, id: newRef.key });
+}
+
+export async function getTopUpTransactions(
+  cardId?: string,
+  userId?: string,
+  limit: number = 50
+): Promise<TopUpTransaction[]> {
+  const snapshot = await get(ref(db, "topup_transactions"));
+  if (!snapshot.exists()) return [];
+
+  let transactions = Object.values(snapshot.val()) as TopUpTransaction[];
+
+  // Sort by timestamp descending (newest first)
+  transactions.sort((a, b) => b.timestamp - a.timestamp);
+
+  // Filter if needed
+  if (cardId) {
+    transactions = transactions.filter((tx) => tx.cardId === cardId);
+  }
+  if (userId) {
+    transactions = transactions.filter((tx) => tx.userId === userId);
+  }
+
+  return transactions.slice(0, limit);
+}
+
+export async function getCardTopUpHistory(cardId: string): Promise<TopUpTransaction[]> {
+  const snapshot = await get(ref(db, "topup_transactions"));
+  if (!snapshot.exists()) return [];
+
+  const transactions = Object.values(snapshot.val()) as TopUpTransaction[];
+
+  return transactions
+    .filter((tx) => tx.cardId === cardId)
+    .sort((a, b) => b.timestamp - a.timestamp);
+}
+
+export async function bindCardToUser(
+  cardId: string,
+  userId: string,
+  userEmail: string
+): Promise<void> {
+  await update(ref(db, `rfid_users/${cardId}`), {
+    userId,
+    userEmail,
+  });
 }
