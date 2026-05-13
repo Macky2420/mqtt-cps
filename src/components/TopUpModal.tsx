@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import {
   X,
   Loader2,
@@ -205,15 +205,93 @@ export function TopUpModal({
     setStep("confirm");
   };
 
-  const simulatePaymentSteps = async (method: PaymentMethod) => {
-    const config = PAYMENT_METHODS.find((m) => m.id === method)!;
-    const stepDelay = config.delay / config.processingSteps.length;
+  // ─── HANDLE RETURN FROM GCASH/MAYA ─────────────────────────
+  // NOTE: If the user returns to your site while this modal is CLOSED,
+  // you should also put this logic in App.tsx so it runs on page load.
+  useEffect(() => {
+    const urlParams = new URLSearchParams(window.location.search);
+    const sourceId = urlParams.get("src");
+    const pendingRaw = sessionStorage.getItem("pendingTopUp");
 
-    for (let i = 0; i < config.processingSteps.length; i++) {
-      setProcessingStep(i);
-      await new Promise((resolve) => setTimeout(resolve, stepDelay));
+    if (sourceId && pendingRaw) {
+      // Clear so this doesn't run again on refresh
+      sessionStorage.removeItem("pendingTopUp");
+      window.history.replaceState({}, document.title, window.location.pathname);
+
+      const pending = JSON.parse(pendingRaw);
+
+      // Restore state from the pending session
+      setAmount(pending.amount);
+      setSelectedMethod(pending.method);
+      setReferenceCode(sourceId);
+      setStep("processing");
+      setIsProcessing(true);
+      setProcessingStep(2);
+
+      fetch("/api/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sourceId }),
+      })
+        .then((res) => res.json())
+        .then(async (data) => {
+          if (data.status === "success") {
+            // Update Firebase balance if the same card is loaded
+            if (card && pending.cardId === card.id) {
+              const previousBalance = card.balance;
+              const newBalance = previousBalance + pending.amount;
+              try {
+                await updateCardBalance(card.id, newBalance);
+                const topUpTx: TopUpTransaction = {
+                  id: Date.now().toString(),
+                  timestamp: Date.now(),
+                  cardId: card.id,
+                  cardNumber: card.number,
+                  cardName: card.name,
+                  userId: currentUser!.uid,
+                  userEmail: currentUser!.email,
+                  amount: pending.amount,
+                  method: pending.method,
+                  status: "success",
+                  referenceCode: sourceId,
+                  previousBalance,
+                  newBalance,
+                };
+                await addTopUpTransaction(topUpTx);
+              } catch (dbErr) {
+                console.error("Balance update error after PayMongo success:", dbErr);
+              }
+            }
+
+            setResultStatus("success");
+            setResultMessage(`Successfully added ₱${pending.amount.toLocaleString()} to your account.`);
+            setIsProcessing(false);
+            setStep("result");
+            notify(
+              "success",
+              "Top-Up Complete",
+              `₱${pending.amount.toLocaleString()} added. Check your updated balance.`
+            );
+            if (publishLCD) publishLCD(`TOPUP OK | PayMongo`);
+            if (onTopUpComplete) onTopUpComplete();
+          } else {
+            setResultStatus("error");
+            setResultMessage("Payment was not completed or was cancelled.");
+            setIsProcessing(false);
+            setStep("result");
+            notify("error", "Payment Failed", "The transaction did not go through.");
+            if (publishLCD) publishLCD("TOPUP FAIL | Cancelled");
+          }
+        })
+        .catch(() => {
+          setResultStatus("error");
+          setResultMessage("Could not verify payment. Please refresh your balance.");
+          setIsProcessing(false);
+          setStep("result");
+          notify("error", "Verification Error", "Failed to confirm payment with server.");
+        });
     }
-  };
+  }, [card, currentUser, notify, onTopUpComplete, publishLCD]);
 
   const handleProcessPayment = async () => {
     // ─── SECURITY CHECK: Only owner can top up ──────────────────
@@ -227,100 +305,69 @@ export function TopUpModal({
         `You are not the owner of this card. Only ${card?.name} can top up this account.`
       );
       if (publishLCD) publishLCD("ACCESS DENIED");
-      setIsProcessing(false);
       return;
     }
 
     if (!card || !selectedMethod) {
       notify("error", "Error", "Missing card or payment method");
-      setIsProcessing(false);
+      return;
+    }
+
+    // PayMongo Sources API only supports GCash & Maya
+    if (selectedMethod === "paypal") {
+      notify("error", "Not Supported", "PayMongo does not support PayPal. Use GCash or Maya.");
       return;
     }
 
     setIsProcessing(true);
     setStep("processing");
 
-    const refCode = generateReferenceCode(selectedMethod);
-    setReferenceCode(refCode);
-
-    // Simulate processing steps
-    await simulatePaymentSteps(selectedMethod);
-
-    // 12% chance of random failure for realism
-    if (Math.random() < 0.12) {
-      setResultStatus("error");
-      setResultMessage(
-        `Payment declined by ${methodConfig?.label}. Insufficient funds or network error.`
-      );
-      notify(
-        "error",
-        `${methodConfig?.label} Payment Failed`,
-        "Transaction was declined. Please try again."
-      );
-      if (publishLCD) publishLCD("TOPUP FAIL | Try Again");
-      setIsProcessing(false);
-      setStep("result");  // ✅ FIX: Go to result step even on failure
-      return;
-    }
-
     try {
-      // Calculate new balance
-      const previousBalance = card.balance;
-      const newBalance = previousBalance + amount;
+      const response = await fetch("/api/topup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          amount,
+          method: selectedMethod,
+          cardId: card.id,
+          cardNumber: card.number,
+          cardName: card.name,
+          userId: currentUser?.uid,
+          userEmail: currentUser?.email,
+        }),
+      });
 
-      // Update card balance in Firebase
-      await updateCardBalance(card.id, newBalance);
+      const data = await response.json();
 
-      // Save top-up transaction
-      const topUpTx: TopUpTransaction = {
-        id: Date.now().toString(),
-        timestamp: Date.now(),
-        cardId: card.id,
-        cardNumber: card.number,
-        cardName: card.name,
-        userId: currentUser!.uid,
-        userEmail: currentUser!.email,
-        amount,
-        method: selectedMethod,
-        status: "success",
-        referenceCode: refCode,
-        previousBalance,
-        newBalance,
-      };
-
-      await addTopUpTransaction(topUpTx);
-
-      // ─── FIX: Set result state BEFORE changing step ────────────
-      setResultStatus("success");
-      setResultMessage(
-        `Successfully added ₱${amount.toLocaleString()} to your account.`
-      );
-      setIsProcessing(false);
-      setStep("result");  // ✅ FIX: This was missing! Now shows success screen
-
-      notify(
-        "success",
-        "Top-Up Complete",
-        `₱${amount.toLocaleString()} added via ${methodConfig?.label}. New balance: ₱${newBalance.toLocaleString()}`
-      );
-
-      if (publishLCD) {
-        publishLCD(`TOPUP OK | Bal:${newBalance}`);
+      if (!response.ok) {
+        throw new Error(data.error || data.details || "Failed to initialize payment");
       }
 
-      // Callback to refresh parent
-      if (onTopUpComplete) {
-        onTopUpComplete();
-      }
+      // Store session so we know what happened when user returns
+      sessionStorage.setItem(
+        "pendingTopUp",
+        JSON.stringify({
+          cardId: card.id,
+          amount,
+          method: selectedMethod,
+          sourceId: data.sourceId,
+        })
+      );
 
-    } catch (error) {
-      console.error("Top-up failed:", error);
+      // Show real PayMongo source ID as reference briefly
+      setReferenceCode(data.sourceId);
+
+      // Redirect to GCash / Maya checkout
+      window.location.href = data.checkoutUrl;
+
+    } catch (err: any) {
+      console.error("Top-up init failed:", err);
       setResultStatus("error");
-      setResultMessage("Failed to update balance. Please check your Firebase connection.");
+      setResultMessage(err.message || "Payment gateway error");
       setIsProcessing(false);
-      setStep("result");  // ✅ FIX: Go to result step on error too
-      notify("error", "Top-Up Failed", "Database update error.");
-      if (publishLCD) publishLCD("TOPUP ERR | DB Error");
+      setStep("result");
+      notify("error", "Top-Up Failed", err.message || "Could not connect to PayMongo.");
+      if (publishLCD) publishLCD("TOPUP ERR | Gateway");
     }
   };
 
@@ -586,7 +633,7 @@ export function TopUpModal({
               <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 flex items-start gap-2">
                 <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
                 <p className="text-xs text-amber-700">
-                  This is a simulation. No real money will be charged. The balance will be updated in Firebase.
+                  You will be redirected to {methodConfig?.label} to complete payment. No real money is charged in sandbox mode.
                 </p>
               </div>
 
@@ -598,7 +645,7 @@ export function TopUpModal({
                 {isProcessing ? (
                   <>
                     <Loader2 className="w-5 h-5 animate-spin" />
-                    Processing...
+                    Connecting to {methodConfig?.label}...
                   </>
                 ) : (
                   <>

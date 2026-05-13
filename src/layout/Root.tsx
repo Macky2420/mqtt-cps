@@ -15,7 +15,6 @@ import {
 import mqtt from "mqtt";
 import type { MqttClient } from "mqtt";
 import { getCurrentUser, logoutUser, type AppUser } from "../utils/storage";
-
 export interface RootOutletContext {
   mqttStatus: string;
   lastRFID: string;
@@ -42,6 +41,7 @@ export function Root() {
     });
     return () => unsubscribe();
   }, [navigate, location]);
+
 
   // ─── MQTT Setup ───
   const [mqttStatus, setMqttStatus] = useState("Disconnected");
