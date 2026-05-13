@@ -150,7 +150,6 @@ export function TopUpModal({
   const methodConfig = PAYMENT_METHODS.find((m) => m.id === selectedMethod);
 
   // ─── OWNER VERIFICATION ──────────────────────────────────────
-  // Check if current user is the owner of this card
   const isOwner = card?.userId === currentUser?.uid;
 
   const generateReferenceCode = (method: PaymentMethod) => {
@@ -228,11 +227,13 @@ export function TopUpModal({
         `You are not the owner of this card. Only ${card?.name} can top up this account.`
       );
       if (publishLCD) publishLCD("ACCESS DENIED");
+      setIsProcessing(false);
       return;
     }
 
     if (!card || !selectedMethod) {
       notify("error", "Error", "Missing card or payment method");
+      setIsProcessing(false);
       return;
     }
 
@@ -258,6 +259,7 @@ export function TopUpModal({
       );
       if (publishLCD) publishLCD("TOPUP FAIL | Try Again");
       setIsProcessing(false);
+      setStep("result");  // ✅ FIX: Go to result step even on failure
       return;
     }
 
@@ -276,8 +278,8 @@ export function TopUpModal({
         cardId: card.id,
         cardNumber: card.number,
         cardName: card.name,
-        userId: currentUser!.uid,        // Owner's UID
-        userEmail: currentUser!.email,   // Owner's email
+        userId: currentUser!.uid,
+        userEmail: currentUser!.email,
         amount,
         method: selectedMethod,
         status: "success",
@@ -288,11 +290,14 @@ export function TopUpModal({
 
       await addTopUpTransaction(topUpTx);
 
-      // Success state
+      // ─── FIX: Set result state BEFORE changing step ────────────
       setResultStatus("success");
       setResultMessage(
         `Successfully added ₱${amount.toLocaleString()} to your account.`
       );
+      setIsProcessing(false);
+      setStep("result");  // ✅ FIX: This was missing! Now shows success screen
+
       notify(
         "success",
         "Top-Up Complete",
@@ -312,11 +317,11 @@ export function TopUpModal({
       console.error("Top-up failed:", error);
       setResultStatus("error");
       setResultMessage("Failed to update balance. Please check your Firebase connection.");
+      setIsProcessing(false);
+      setStep("result");  // ✅ FIX: Go to result step on error too
       notify("error", "Top-Up Failed", "Database update error.");
       if (publishLCD) publishLCD("TOPUP ERR | DB Error");
     }
-
-    setIsProcessing(false);
   };
 
   const handleRetry = () => {
