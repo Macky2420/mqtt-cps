@@ -21,6 +21,8 @@ import { notification } from "antd";
 import type { NotificationArgsProps } from "antd";
 import type { RootOutletContext } from "../layout/Root";
 
+import { getDatabase, ref, onValue } from "firebase/database";
+
 import {
   getProducts,
   findCardByNumber,
@@ -82,6 +84,7 @@ export function POS() {
   const [selectedTopUpCard, setSelectedTopUpCard] = useState<RFIDCard | null>(null);
   const [loadingCards, setLoadingCards] = useState(false);
   const [myCard, setMyCard] = useState<RFIDCard | null>(null);
+  const [liveBalance, setLiveBalance] = useState<number | null>(null);
 
   const [paymentStatus, setPaymentStatus] = useState<
     "idle" | "waiting" | "processing" | "success" | "error"
@@ -150,6 +153,26 @@ export function POS() {
       loadMyCard();
     }
   }, [currentUser, isAdmin]);
+
+  // ─── Live balance listener from Firebase ────────────────────
+  useEffect(() => {
+    if (!myCard?.id) {
+      setLiveBalance(null);
+      return;
+    }
+
+    const db = getDatabase();
+    const balanceRef = ref(db, `cards/${myCard.id}/balance`);
+
+    const unsubscribe = onValue(balanceRef, (snapshot) => {
+      const value = snapshot.val();
+      setLiveBalance(value ?? myCard.balance ?? 0);
+    });
+
+    return () => unsubscribe();
+  }, [myCard?.id, myCard?.balance]);
+
+  const displayBalance = liveBalance ?? myCard?.balance ?? 0;
 
   useEffect(() => {
     setRFIDHandler(async (uid: string) => {
@@ -566,8 +589,10 @@ export function POS() {
             </div>
           </div>
           <div className="text-right">
-            <p className="text-xs text-green-600">Your Balance</p>
-            <p className="text-xl font-bold text-green-800">₱{myCard.balance.toLocaleString()}</p>
+            <p className="text-xs text-green-600">Balance from Card</p>
+            <p className="text-xl font-bold text-green-800">
+              ₱{displayBalance.toLocaleString()}
+            </p>
           </div>
         </div>
       )}

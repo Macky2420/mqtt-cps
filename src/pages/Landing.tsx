@@ -74,7 +74,6 @@ export function Landing() {
     email: "",
     password: "",
     rfidNumber: "",
-    initialBalance: "",
   });
   const [showRegisterPassword, setShowRegisterPassword] = useState(false);
   const [registering, setRegistering] = useState(false);
@@ -189,7 +188,7 @@ export function Landing() {
     e.preventDefault();
     if (registering) return;
 
-    const { fullName, email, password, rfidNumber, initialBalance } = registerForm;
+    const { fullName, email, password, rfidNumber } = registerForm;
 
     if (!fullName.trim() || !email.trim() || !password.trim()) {
       notify("warning", "Missing fields", "Please fill in all required fields.");
@@ -198,12 +197,6 @@ export function Landing() {
 
     if (!rfidNumber.trim()) {
       notify("warning", "RFID required", "Please tap or enter your RFID card number.");
-      return;
-    }
-
-    const balance = Number(initialBalance);
-    if (isNaN(balance) || balance < 0) {
-      notify("warning", "Invalid balance", "Please enter a valid initial balance.");
       return;
     }
 
@@ -216,10 +209,11 @@ export function Landing() {
 
     setRegistering(true);
     try {
-      await registerUser(email, password, fullName, rfidNumber.trim(), balance);
-      notify("success", "Registration successful!", `Welcome, ${fullName}! Your card is ready.`);
+      // Register with ZERO balance — users must top up via POS
+      await registerUser(email, password, fullName, rfidNumber.trim(), 0);
+      notify("success", "Registration successful!", `Welcome, ${fullName}! Your card is ready with ₱0 balance. Top up at the POS.`);
       setShowRegisterModal(false);
-      setRegisterForm({ fullName: "", email: "", password: "", rfidNumber: "", initialBalance: "" });
+      setRegisterForm({ fullName: "", email: "", password: "", rfidNumber: "" });
       navigate("/pos");
     } catch (error: any) {
       console.error("Registration error:", error);
@@ -240,7 +234,7 @@ export function Landing() {
     if (registering) return;
     setShowRegisterModal(false);
     stopRFIDListening();
-    setRegisterForm({ fullName: "", email: "", password: "", rfidNumber: "", initialBalance: "" });
+    setRegisterForm({ fullName: "", email: "", password: "", rfidNumber: "" });
   };
 
   // ─── Features for landing page ───
@@ -657,24 +651,15 @@ export function Landing() {
                   )}
                 </div>
 
-                {/* Initial Balance */}
-                <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1.5">
-                    Initial Balance (₱)
-                  </label>
-                  <div className="relative">
-                    <PhilippinePeso className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-                    <input
-                      type="number"
-                      value={registerForm.initialBalance}
-                      onChange={(e) => setRegisterForm({ ...registerForm, initialBalance: e.target.value })}
-                      className="w-full pl-10 pr-4 py-2.5 border border-slate-200 rounded-xl text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
-                      placeholder="100"
-                      min="0"
-                      step="1"
-                      required
-                    />
+                {/* Zero Balance Info */}
+                <div className="p-3 bg-blue-50 border border-blue-200 rounded-xl">
+                  <div className="flex items-center gap-2 text-sm text-blue-700">
+                    <PhilippinePeso className="w-4 h-4" />
+                    <span className="font-medium">Starting Balance: ₱0</span>
                   </div>
+                  <p className="text-xs text-blue-600 mt-1">
+                    Your card starts with zero balance. Top up anytime at the POS using GCash or Maya.
+                  </p>
                 </div>
 
                 {/* Buttons */}

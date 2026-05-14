@@ -3,7 +3,6 @@ import {
   Plus,
   Pencil,
   Trash2,
-  Wallet,
   CreditCard,
   Loader2,
   Search,
@@ -12,14 +11,13 @@ import {
   PhilippinePeso,
   User,
   Hash,
-  ArrowUpCircle,
 } from "lucide-react";
 import { Modal, notification } from "antd";
+import { getDatabase, ref, onValue } from "firebase/database";
 import {
   getCards,
   saveCard,
   deleteCard,
-  topUpCardBalance,
   type RFIDCard,
 } from "../utils/storage";
 
@@ -56,9 +54,7 @@ export function RFIDCards() {
   const [filteredCards, setFilteredCards] = useState<RFIDCard[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
   const [showModal, setShowModal] = useState(false);
-  const [showTopUpModal, setShowTopUpModal] = useState(false);
   const [editingCard, setEditingCard] = useState<RFIDCard | null>(null);
-  const [topUpCard, setTopUpCard] = useState<RFIDCard | null>(null);
 
   const [formData, setFormData] = useState({
     number: "",
@@ -66,9 +62,11 @@ export function RFIDCards() {
     balance: "",
   });
 
-  const [topUpAmount, setTopUpAmount] = useState("");
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+
+  // ─── Live balances from Firebase ────────────────────────────
+  const [liveBalances, setLiveBalances] = useState<Record<string, number>>({});
 
   useEffect(() => {
     loadCards();
@@ -85,6 +83,34 @@ export function RFIDCards() {
       )
     );
   }, [searchQuery, cards]);
+
+  // ─── Subscribe to live balances for all cards ───────────────
+  useEffect(() => {
+    if (cards.length === 0) return;
+
+    const db = getDatabase();
+    const unsubscribes: (() => void)[] = [];
+
+    cards.forEach((card) => {
+      const balanceRef = ref(db, `cards/${card.id}/balance`);
+      const unsubscribe = onValue(balanceRef, (snapshot) => {
+        const value = snapshot.val();
+        setLiveBalances((prev) => ({
+          ...prev,
+          [card.id]: value ?? card.balance ?? 0,
+        }));
+      });
+      unsubscribes.push(unsubscribe);
+    });
+
+    return () => {
+      unsubscribes.forEach((unsub) => unsub());
+    };
+  }, [cards]);
+
+  const getCardBalance = (card: RFIDCard) => {
+    return liveBalances[card.id] ?? card.balance ?? 0;
+  };
 
   const loadCards = async () => {
     try {
@@ -154,12 +180,6 @@ export function RFIDCards() {
     });
   };
 
-  const handleTopUp = (card: RFIDCard) => {
-    setTopUpCard(card);
-    setTopUpAmount("");
-    setShowTopUpModal(true);
-  };
-
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (submitting) return;
@@ -223,57 +243,11 @@ export function RFIDCards() {
     }
   };
 
-  const handleTopUpSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!topUpCard || submitting) return;
-
-    const amount = Number(topUpAmount);
-
-    if (isNaN(amount) || amount <= 0) {
-      notify(
-        "warning",
-        "Invalid amount",
-        "Please enter a valid amount greater than 0."
-      );
-      return;
-    }
-
-    const newBalance = topUpCard.balance + amount;
-
-    try {
-      setSubmitting(true);
-      await topUpCardBalance(topUpCard.id, newBalance);
-      await loadCards();
-
-      setShowTopUpModal(false);
-      setTopUpCard(null);
-      setTopUpAmount("");
-
-      notify(
-        "success",
-        "Top-up successful",
-        `₱${amount.toLocaleString()} added to "${topUpCard.name}". New balance: ₱${newBalance.toLocaleString()}.`
-      );
-    } catch (error) {
-      console.error("Failed to top up balance:", error);
-      notify("error", "Failed to top up balance");
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
   const closeModal = () => {
     if (submitting) return;
     setShowModal(false);
     setEditingCard(null);
     setFormData({ number: "", name: "", balance: "" });
-  };
-
-  const closeTopUpModal = () => {
-    if (submitting) return;
-    setShowTopUpModal(false);
-    setTopUpCard(null);
-    setTopUpAmount("");
   };
 
   const getBalanceColor = (balance: number) => {
@@ -293,7 +267,7 @@ export function RFIDCards() {
             RFID Cards
           </h2>
           <p className="text-sm text-slate-500 mt-0.5">
-            Manage student cards and top-up balances
+            Manage student cards — balance updates from customer top-ups
           </p>
         </div>
 
@@ -362,7 +336,7 @@ export function RFIDCards() {
                       Card Details
                     </th>
                     <th className="px-6 py-4 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider">
-                      Balance
+                      Balance from Card
                     </th>
                     <th className="px-6 py-4 text-right text-xs font-semibold text-slate-500 uppercase tracking-wider">
                       Actions
@@ -371,144 +345,130 @@ export function RFIDCards() {
                 </thead>
 
                 <tbody className="divide-y divide-slate-100">
-                  {filteredCards.map((card) => (
-                    <tr
-                      key={card.id}
-                      className="hover:bg-slate-50/80 transition-colors"
-                    >
-                      <td className="px-6 py-4">
-                        <div className="flex items-center gap-3">
-                          <div className="w-10 h-10 bg-blue-100 rounded-xl flex items-center justify-center shrink-0">
-                            <CreditCard className="w-5 h-5 text-blue-600" />
-                          </div>
-                          <div>
-                            <div className="font-semibold text-slate-900">
-                              {card.name}
+                  {filteredCards.map((card) => {
+                    const balance = getCardBalance(card);
+                    return (
+                      <tr
+                        key={card.id}
+                        className="hover:bg-slate-50/80 transition-colors"
+                      >
+                        <td className="px-6 py-4">
+                          <div className="flex items-center gap-3">
+                            <div className="w-10 h-10 bg-blue-100 rounded-xl flex items-center justify-center shrink-0">
+                              <CreditCard className="w-5 h-5 text-blue-600" />
                             </div>
-                            <div className="text-xs font-mono text-slate-500 mt-0.5">
-                              {card.number}
+                            <div>
+                              <div className="font-semibold text-slate-900">
+                                {card.name}
+                              </div>
+                              <div className="text-xs font-mono text-slate-500 mt-0.5">
+                                {card.number}
+                              </div>
                             </div>
                           </div>
-                        </div>
-                      </td>
+                        </td>
 
-                      <td className="px-6 py-4">
-                        <span
-                          className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-bold border ${getBalanceColor(
-                            card.balance
-                          )}`}
-                        >
-                          <PhilippinePeso className="w-3.5 h-3.5" />
-                          {card.balance.toLocaleString()}
-                        </span>
-                      </td>
-
-                      <td className="px-6 py-4 text-right">
-                        <div className="flex items-center justify-end gap-2">
-                          <button
-                            type="button"
-                            onClick={() => handleTopUp(card)}
-                            className="flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-green-700 
-                            bg-green-50 hover:bg-green-100 rounded-lg transition-colors"
-                            title="Top Up"
+                        <td className="px-6 py-4">
+                          <span
+                            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-bold border ${getBalanceColor(
+                              balance
+                            )}`}
                           >
-                            <ArrowUpCircle className="w-4 h-4" />
-                            Top Up
-                          </button>
+                            <PhilippinePeso className="w-3.5 h-3.5" />
+                            {balance.toLocaleString()}
+                          </span>
+                        </td>
 
-                          <button
-                            type="button"
-                            onClick={() => handleEdit(card)}
-                            className="p-2 text-blue-600 bg-blue-50 hover:bg-blue-100 
-                            rounded-lg transition-colors"
-                            title="Edit"
-                          >
-                            <Pencil className="w-4 h-4" />
-                          </button>
+                        <td className="px-6 py-4 text-right">
+                          <div className="flex items-center justify-end gap-2">
+                            <button
+                              type="button"
+                              onClick={() => handleEdit(card)}
+                              className="p-2 text-blue-600 bg-blue-50 hover:bg-blue-100 
+                              rounded-lg transition-colors"
+                              title="Edit"
+                            >
+                              <Pencil className="w-4 h-4" />
+                            </button>
 
-                          <button
-                            type="button"
-                            onClick={() => handleDelete(card.id, card.name)}
-                            className="p-2 text-red-600 bg-red-50 hover:bg-red-100 
-                            rounded-lg transition-colors"
-                            title="Delete"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
+                            <button
+                              type="button"
+                              onClick={() => handleDelete(card.id, card.name)}
+                              className="p-2 text-red-600 bg-red-50 hover:bg-red-100 
+                              rounded-lg transition-colors"
+                              title="Delete"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
 
             <div className="md:hidden divide-y divide-slate-100">
-              {filteredCards.map((card) => (
-                <div
-                  key={card.id}
-                  className="p-4 hover:bg-slate-50/80 transition-colors"
-                >
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="flex items-center gap-3 flex-1 min-w-0">
-                      <div className="w-10 h-10 bg-blue-100 rounded-xl flex items-center justify-center shrink-0">
-                        <CreditCard className="w-5 h-5 text-blue-600" />
-                      </div>
-                      <div className="min-w-0">
-                        <h3 className="font-semibold text-slate-900 truncate">
-                          {card.name}
-                        </h3>
-                        <div className="text-xs font-mono text-slate-500 mt-0.5">
-                          {card.number}
+              {filteredCards.map((card) => {
+                const balance = getCardBalance(card);
+                return (
+                  <div
+                    key={card.id}
+                    className="p-4 hover:bg-slate-50/80 transition-colors"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex items-center gap-3 flex-1 min-w-0">
+                        <div className="w-10 h-10 bg-blue-100 rounded-xl flex items-center justify-center shrink-0">
+                          <CreditCard className="w-5 h-5 text-blue-600" />
                         </div>
-                        <div className="mt-2">
-                          <span
-                            className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-bold border ${getBalanceColor(
-                              card.balance
-                            )}`}
-                          >
-                            <PhilippinePeso className="w-3 h-3" />
-                            {card.balance.toLocaleString()}
-                          </span>
+                        <div className="min-w-0">
+                          <h3 className="font-semibold text-slate-900 truncate">
+                            {card.name}
+                          </h3>
+                          <div className="text-xs font-mono text-slate-500 mt-0.5">
+                            {card.number}
+                          </div>
+                          <div className="mt-2">
+                            <span
+                              className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-bold border ${getBalanceColor(
+                                balance
+                              )}`}
+                            >
+                              <PhilippinePeso className="w-3 h-3" />
+                              {balance.toLocaleString()}
+                            </span>
+                          </div>
                         </div>
                       </div>
                     </div>
+
+                    <div className="flex items-center gap-2 mt-3 pt-3 border-t border-slate-100">
+                      <button
+                        type="button"
+                        onClick={() => handleEdit(card)}
+                        className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2.5 
+                        text-sm font-medium text-blue-700 bg-blue-50 
+                        hover:bg-blue-100 rounded-xl transition-colors"
+                      >
+                        <Pencil className="w-4 h-4" />
+                        Edit
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => handleDelete(card.id, card.name)}
+                        className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2.5 
+                        text-sm font-medium text-red-700 bg-red-50 
+                        hover:bg-red-100 rounded-xl transition-colors"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                        Delete
+                      </button>
+                    </div>
                   </div>
-
-                  <div className="flex items-center gap-2 mt-3 pt-3 border-t border-slate-100">
-                    <button
-                      type="button"
-                      onClick={() => handleTopUp(card)}
-                      className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2.5 
-                      text-sm font-medium text-green-700 bg-green-50 
-                      hover:bg-green-100 rounded-xl transition-colors"
-                    >
-                      <ArrowUpCircle className="w-4 h-4" />
-                      Top Up
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => handleEdit(card)}
-                      className="p-2.5 text-blue-600 bg-blue-50 hover:bg-blue-100 
-                      rounded-xl transition-colors"
-                      title="Edit"
-                    >
-                      <Pencil className="w-4 h-4" />
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => handleDelete(card.id, card.name)}
-                      className="p-2.5 text-red-600 bg-red-50 hover:bg-red-100 
-                      rounded-xl transition-colors"
-                      title="Delete"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </>
         )}
@@ -658,154 +618,6 @@ export function RFIDCards() {
                   </button>
                 </div>
               </form>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {showTopUpModal && topUpCard && (
-        <div className="fixed inset-0 z-50">
-          <div
-            className="absolute inset-0 bg-black/40 backdrop-blur-sm transition-opacity"
-            onClick={closeTopUpModal}
-          />
-
-          <div className="absolute inset-0 flex items-center justify-center p-4 pointer-events-none">
-            <div
-              className="bg-white rounded-2xl shadow-2xl w-full max-w-md pointer-events-auto
-              animate-in fade-in zoom-in-95 duration-200"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <div className="flex items-center justify-between px-6 py-5 border-b border-slate-100">
-                <div>
-                  <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
-                    <Wallet className="w-5 h-5 text-green-600" />
-                    Top Up Balance
-                  </h3>
-                  <p className="text-sm text-slate-500 mt-0.5">
-                    Add funds to {topUpCard.name}'s card
-                  </p>
-                </div>
-
-                <button
-                  type="button"
-                  onClick={closeTopUpModal}
-                  disabled={submitting}
-                  className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 
-                  rounded-lg transition-colors disabled:opacity-50"
-                >
-                  <X className="w-5 h-5" />
-                </button>
-              </div>
-
-              <div className="p-6 space-y-4">
-                <div className="p-4 bg-slate-50 rounded-xl border border-slate-100 space-y-2">
-                  <div className="flex items-center gap-2 text-sm">
-                    <User className="w-4 h-4 text-slate-400" />
-                    <span className="text-slate-600">Name:</span>
-                    <span className="font-semibold text-slate-900">
-                      {topUpCard.name}
-                    </span>
-                  </div>
-
-                  <div className="flex items-center gap-2 text-sm">
-                    <Hash className="w-4 h-4 text-slate-400" />
-                    <span className="text-slate-600">Card:</span>
-                    <span className="font-mono text-slate-900">
-                      {topUpCard.number}
-                    </span>
-                  </div>
-
-                  <div className="flex items-center gap-2 text-sm pt-2 border-t border-slate-200">
-                    <PhilippinePeso className="w-4 h-4 text-slate-400" />
-                    <span className="text-slate-600">Current Balance:</span>
-                    <span
-                      className={`font-bold ${
-                        topUpCard.balance < 50
-                          ? "text-red-600"
-                          : "text-slate-900"
-                      }`}
-                    >
-                      ₱{topUpCard.balance.toLocaleString()}
-                    </span>
-                  </div>
-                </div>
-
-                <form onSubmit={handleTopUpSubmit} className="space-y-4">
-                  <div>
-                    <label className="block text-sm font-medium text-slate-700 mb-1.5">
-                      Top Up Amount (₱)
-                    </label>
-                    <div className="relative">
-                      <PhilippinePeso className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-                      <input
-                        type="number"
-                        value={topUpAmount}
-                        onChange={(e) => setTopUpAmount(e.target.value)}
-                        className="w-full pl-10 pr-4 py-2.5 border border-slate-200 rounded-xl
-                        text-slate-900 placeholder-slate-400
-                        focus:outline-none focus:ring-2 focus:ring-green-500/20 
-                        focus:border-green-500 transition-all"
-                        placeholder="100"
-                        min="1"
-                        step="1"
-                        required
-                        autoFocus
-                      />
-                    </div>
-                  </div>
-
-                  {topUpAmount &&
-                    !isNaN(Number(topUpAmount)) &&
-                    Number(topUpAmount) > 0 && (
-                      <div className="p-4 bg-green-50 border border-green-200 rounded-xl">
-                        <div className="text-sm text-green-700 font-medium mb-1">
-                          New Balance Preview
-                        </div>
-                        <div className="text-2xl font-bold text-green-800 flex items-center gap-1">
-                          <PhilippinePeso className="w-5 h-5" />
-                          {(
-                            topUpCard.balance + Number(topUpAmount)
-                          ).toLocaleString()}
-                        </div>
-                      </div>
-                    )}
-
-                  <div className="flex gap-3 pt-2">
-                    <button
-                      type="button"
-                      onClick={closeTopUpModal}
-                      disabled={submitting}
-                      className="flex-1 px-4 py-2.5 border border-slate-200 rounded-xl
-                      font-medium text-slate-700 hover:bg-slate-50 
-                      transition-colors disabled:opacity-50"
-                    >
-                      Cancel
-                    </button>
-
-                    <button
-                      type="submit"
-                      disabled={submitting}
-                      className="flex-1 px-4 py-2.5 bg-green-600 text-white font-medium
-                      rounded-xl hover:bg-green-700 active:scale-[0.98]
-                      disabled:opacity-60 disabled:cursor-not-allowed
-                      transition-all flex items-center justify-center gap-2"
-                    >
-                      {submitting ? (
-                        <>
-                          <Loader2 className="w-4 h-4 animate-spin" />
-                          Processing...
-                        </>
-                      ) : (
-                        <>
-                          <ArrowUpCircle className="w-4 h-4" />
-                          Top Up
-                        </>
-                      )}
-                    </button>
-                  </div>
-                </form>
-              </div>
             </div>
           </div>
         </div>

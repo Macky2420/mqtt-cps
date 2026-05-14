@@ -524,28 +524,28 @@ export function Dashboard() {
                             </td>
                             <td className="px-6 py-4">
                               <div className="font-medium text-slate-900">
-                                {transaction.cardName}
+                                {transaction.cardName || "Unknown"}
                               </div>
                               <div className="text-xs font-mono text-slate-500 mt-0.5">
-                                {transaction.cardNumber}
+                                {transaction.cardNumber || "N/A"}
                               </div>
                             </td>
                             <td className="px-6 py-4 text-sm text-slate-600">
                               <div className="space-y-1">
-                                {transaction.items.map((item, idx) => (
+                                {(transaction.items || []).map((item, idx) => (
                                   <div key={idx} className="flex items-center gap-1.5">
                                     <span className="text-xs font-bold text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded">
-                                      {item.quantity}x
+                                      {(item?.quantity || 0)}x
                                     </span>
                                     <span className="truncate max-w-[150px]">
-                                      {item.productName}
+                                      {item?.productName || "Unknown Item"}
                                     </span>
                                   </div>
                                 ))}
                               </div>
                             </td>
                             <td className="px-6 py-4 text-sm text-right font-bold text-slate-900">
-                              ₱{transaction.total.toLocaleString()}
+                              ₱{(transaction.total || 0).toLocaleString()}
                             </td>
                           </tr>
                         ))}
@@ -563,16 +563,16 @@ export function Dashboard() {
                         <div className="flex items-start justify-between gap-3 mb-2">
                           <div>
                             <div className="font-semibold text-slate-900">
-                              {transaction.cardName}
+                              {transaction.cardName || "Unknown"}
                             </div>
                             <div className="text-xs font-mono text-slate-500">
-                              {transaction.cardNumber}
+                              {transaction.cardNumber || "N/A"}
                             </div>
                           </div>
                           <div className="text-right shrink-0">
                             <div className="text-lg font-bold text-slate-900 flex items-center justify-end gap-0.5">
                               <PhilippinePeso className="w-4 h-4" />
-                              {transaction.total.toLocaleString()}
+                              {(transaction.total || 0).toLocaleString()}
                             </div>
                             <div className="text-xs text-slate-400 mt-0.5 flex items-center justify-end gap-1">
                               <Clock className="w-3 h-3" />
@@ -582,16 +582,16 @@ export function Dashboard() {
                         </div>
 
                         <div className="flex flex-wrap gap-1.5 mt-2">
-                          {transaction.items.map((item, idx) => (
+                          {(transaction.items || []).map((item, idx) => (
                             <span
                               key={idx}
                               className="inline-flex items-center gap-1 text-xs bg-slate-100 
                                        text-slate-700 px-2 py-1 rounded-md"
                             >
                               <span className="font-bold text-slate-500">
-                                {item.quantity}x
+                                {(item?.quantity || 0)}x
                               </span>
-                              {item.productName}
+                              {item?.productName || "Unknown Item"}
                             </span>
                           ))}
                         </div>
